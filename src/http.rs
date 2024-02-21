@@ -23,7 +23,7 @@ pub struct HttpResponse {
     status: HttpStatus,
     status_message: Option<String>,
     headers: HashMap<String, String>,
-    content: Option<Box<dyn HttpContent>>,
+    content: Option<Box<dyn HttpContent + Send + Sync>>,
 }
 
 impl HttpResponse {
@@ -45,7 +45,7 @@ impl HttpResponse {
         }
     }
 
-    pub fn with_content(self, content: Box<dyn HttpContent>) -> Self {
+    pub fn with_content(self, content: Box<dyn HttpContent + Send + Sync>) -> Self {
         Self {
             status: self.status,
             status_message: self.status_message,
@@ -62,7 +62,7 @@ impl HttpResponse {
         self.status_message.as_ref()
     }
 
-    pub fn content(&self) -> Option<&Box<dyn HttpContent>> {
+    pub fn content(&self) -> Option<&Box<dyn HttpContent + Send + Sync>> {
         self.content.as_ref()
     }
 
@@ -74,7 +74,7 @@ impl HttpResponse {
 pub trait HttpContent {
     fn content_type(&self) -> &str;
     fn content_length(&self) -> u64;
-    fn content(&self) -> Box<dyn AsyncRead + Unpin + '_>;
+    fn content(&self) -> Box<dyn AsyncRead + Send + Sync + Unpin + '_>;
 }
 
 pub struct PlainTextContent {
@@ -96,7 +96,7 @@ impl HttpContent for PlainTextContent {
         self.text.len().try_into().expect("Text too big!")
     }
 
-    fn content(&self) -> Box<dyn AsyncRead + Unpin + '_> {
+    fn content(&self) -> Box<dyn AsyncRead + Send + Sync + Unpin + '_> {
         let cursor = std::io::Cursor::new(self.text.as_bytes());
         Box::new(cursor)
     }
