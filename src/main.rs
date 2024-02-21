@@ -3,11 +3,24 @@ mod http;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use anyhow::{bail, Context, Result};
+use clap::Parser;
+use once_cell::sync::Lazy;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use crate::http::{HttpResponse, HttpStatus, PlainTextContent};
+use tokio::sync::RwLock;
+use crate::http::{FileContent, HttpResponse, HttpStatus, PlainTextContent};
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(short, long, default_value = None)]
+    directory: Option<String>,
+}
+
+static CONFIG: Lazy<Arc<RwLock<Args>>> = Lazy::new(|| Arc::new(RwLock::new(Args::parse())));
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,7 +63,6 @@ impl TryFrom<&str> for HttpMethod {
 async fn read_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<HashMap<String, String>> {
     let mut line_buffer = String::new();
     let mut headers = HashMap::new();
-    // Read until end of headers
     loop {
         reader.read_line(&mut line_buffer).await?;
         {
@@ -146,8 +158,9 @@ impl RequestContext {
         }
         self.writer.write(b"\r\n").await?;
 
-        if let Some(content) = response.content() {
-            let mut content_reader = content.content();
+        if let Some(content) = response.content().as_mut() {
+            let mut content_reader = content.content()?;
+
             _ = tokio::io::copy(&mut content_reader, &mut self.writer).await?;
         }
 
@@ -168,6 +181,8 @@ async fn process_request(mut ctx: RequestContext) -> Result<()> {
                 _ => {
                     if ctx.path.starts_with("/echo/") {
                         echo(&mut ctx).await?;
+                    } else if ctx.path.starts_with("/files/") {
+                        files(&mut ctx).await?;
                     } else {
                         _ = ctx.writer.write(b"HTTP/1.1 404 Not Found\r\n\r\n").await?
                     }
@@ -206,6 +221,28 @@ pub async fn user_agent(ctx: &mut RequestContext) -> Result<()> {
             .with_content(PlainTextContent::new(agent))
     } else {
         HttpResponse::new(HttpStatus::BadRequest)
+    };
+
+    ctx.send(response).await?;
+
+    Ok(())
+}
+
+pub async fn files(ctx: &mut RequestContext) -> Result<()> {
+    let file_path = {
+        let config = CONFIG.read().await;
+        if config.directory.is_none() {
+            ctx.send(HttpResponse::new(HttpStatus::InternalServerError)).await?;
+            return Ok(());
+        }
+
+        PathBuf::from(config.directory.as_ref().unwrap()).join(&ctx.path["/files/".len()..])
+    };
+
+    let response = if !file_path.exists() {
+        HttpResponse::new(HttpStatus::NotFound)
+    } else {
+        HttpResponse::new(HttpStatus::Ok).with_content(FileContent::new(file_path))
     };
 
     ctx.send(response).await?;

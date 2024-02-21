@@ -1,5 +1,9 @@
 use std::collections::HashMap;
-use tokio::io::AsyncRead;
+use std::fs;
+use std::fs::File;
+use std::path::PathBuf;
+use nom::ToUsize;
+use tokio::io::{AsyncRead, BufReader};
 
 #[allow(unused)]
 #[derive(Copy, Clone, Debug)]
@@ -7,6 +11,7 @@ pub enum HttpStatus {
     Ok = 200,
     BadRequest = 400,
     NotFound = 404,
+    InternalServerError = 500,
 }
 
 impl Into<&'static str> for HttpStatus {
@@ -15,6 +20,7 @@ impl Into<&'static str> for HttpStatus {
             HttpStatus::Ok => "OK",
             HttpStatus::BadRequest => "BadRequest",
             HttpStatus::NotFound => "NotFound",
+            HttpStatus::InternalServerError => "InternalServerError",
         }
     }
 }
@@ -73,8 +79,8 @@ impl HttpResponse {
 
 pub trait HttpContent {
     fn content_type(&self) -> &str;
-    fn content_length(&self) -> u64;
-    fn content(&self) -> Box<dyn AsyncRead + Send + Sync + Unpin + '_>;
+    fn content_length(&self) -> usize;
+    fn content(&self) -> Result<Box<dyn AsyncRead + Send + Sync + Unpin + '_>, anyhow::Error>;
 }
 
 pub struct PlainTextContent {
@@ -92,12 +98,38 @@ impl HttpContent for PlainTextContent {
         "text/plain"
     }
 
-    fn content_length(&self) -> u64 {
-        self.text.len().try_into().expect("Text too big!")
+    fn content_length(&self) -> usize {
+        self.text.len()
     }
 
-    fn content(&self) -> Box<dyn AsyncRead + Send + Sync + Unpin + '_> {
+    fn content(&self) -> Result<Box<dyn AsyncRead + Send + Sync + Unpin + '_>, anyhow::Error> {
         let cursor = std::io::Cursor::new(self.text.as_bytes());
-        Box::new(cursor)
+        Ok(Box::new(cursor))
+    }
+}
+
+pub struct FileContent {
+    path: PathBuf,
+}
+
+impl FileContent {
+    pub fn new(path: PathBuf) -> Box<Self> {
+        Box::new(Self { path })
+    }
+}
+
+impl HttpContent for FileContent {
+    fn content_type(&self) -> &str {
+        "application/octet-stream"
+    }
+
+    fn content_length(&self) -> usize {
+        fs::metadata(self.path.as_path()).expect("File doesn't exist?").len().to_usize()
+    }
+
+    fn content(&self) -> Result<Box<dyn AsyncRead + Send + Sync + Unpin + '_>, anyhow::Error> {
+        let file = File::open(&self.path)?;
+        let file = tokio::fs::File::from(file);
+        Ok(Box::new(BufReader::new(file)))
     }
 }
