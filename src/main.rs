@@ -1,9 +1,13 @@
+mod http;
+
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use crate::http::{HttpResponse, HttpStatus, PlainTextContent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,7 +19,7 @@ async fn main() -> Result<()> {
 }
 
 #[derive(Debug)]
-enum HttpMethod {
+pub enum HttpMethod {
     Get,
     Post,
 }
@@ -43,9 +47,9 @@ impl TryFrom<&str> for HttpMethod {
     }
 }
 
-async fn read_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<String>> {
+async fn read_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<HashMap<String, String>> {
     let mut line_buffer = String::new();
-    let mut headers = Vec::new();
+    let mut headers = HashMap::new();
     // Read until end of headers
     loop {
         reader.read_line(&mut line_buffer).await?;
@@ -55,7 +59,10 @@ async fn read_headers(reader: &mut BufReader<OwnedReadHalf>) -> Result<Vec<Strin
                 break;
             }
 
-            headers.push(line_buffer.to_string());
+            let mut parts = line_buffer.splitn(2, ':');
+            let key = parts.next().unwrap().trim().to_string();
+            let value = parts.next().unwrap().trim().to_string();
+            headers.insert(key, value);
         }
         line_buffer.clear();
     }
@@ -105,13 +112,41 @@ async fn handle_connection(addr: SocketAddr, stream: TcpStream) -> Result<()> {
 }
 
 #[allow(unused)]
-struct RequestContext {
+pub struct RequestContext {
     pub reader: BufReader<OwnedReadHalf>,
     pub writer: BufWriter<OwnedWriteHalf>,
     pub method: HttpMethod,
     pub path: String,
     pub http_version: String,
-    pub headers: Vec<String>,
+    pub headers: HashMap<String, String>,
+}
+
+impl RequestContext {
+    pub async fn send(&mut self, response: HttpResponse) -> Result<()> {
+        self.writer.write(format!("HTTP/1.1 {} ", response.status() as u16).as_bytes()).await?;
+        if let Some(message) = response.status_message() {
+            self.writer.write(message.as_bytes()).await?;
+        } else {
+            self.writer.write(format!("{:?}", response.status()).as_bytes()).await?;
+        }
+        self.writer.write(b"\r\n").await?;
+
+        for header in response.headers() {
+            self.writer.write(format!("{}: {}\r\n", header.0, header.1).as_bytes()).await?;
+        }
+        if let Some(content) = response.content() {
+            self.writer.write(format!("Content-Type: {}\r\n", content.content_type()).as_bytes()).await?;
+            self.writer.write(format!("Content-Length: {}\r\n", content.content_length()).as_bytes()).await?;
+        }
+        self.writer.write(b"\r\n").await?;
+
+        if let Some(content) = response.content() {
+            let mut content_reader = content.content();
+            _ = tokio::io::copy(&mut content_reader, &mut self.writer).await?;
+        }
+
+        Ok(())
+    }
 }
 
 async fn process_request(mut ctx: RequestContext) -> Result<()> {
@@ -121,6 +156,8 @@ async fn process_request(mut ctx: RequestContext) -> Result<()> {
         HttpMethod::Get => {
             match ctx.path.as_str() {
                 "/" => index(&mut ctx).await?,
+
+                "/user-agent" => user_agent(&mut ctx).await?,
 
                 _ => {
                     if ctx.path.starts_with("/echo/") {
@@ -140,12 +177,12 @@ async fn process_request(mut ctx: RequestContext) -> Result<()> {
     Ok(())
 }
 
-async fn index(ctx: &mut RequestContext) -> Result<()> {
+pub async fn index(ctx: &mut RequestContext) -> Result<()> {
     ctx.writer.write(b"HTTP/1.1 200 OK\r\n\r\n").await?;
     Ok(())
 }
 
-async fn echo(ctx: &mut RequestContext) -> Result<()> {
+pub async fn echo(ctx: &mut RequestContext) -> Result<()> {
     ctx.writer.write(b"HTTP/1.1 200 OK\r\n").await?;
     ctx.writer.write(b"Content-Type: text/plain\r\n").await?;
     let remaining = &ctx.path["/echo/".len()..];
@@ -153,5 +190,19 @@ async fn echo(ctx: &mut RequestContext) -> Result<()> {
     ctx.writer.write(b"\r\n").await?;
 
     ctx.writer.write(remaining.as_bytes()).await?;
+    Ok(())
+}
+
+pub async fn user_agent(ctx: &mut RequestContext) -> Result<()> {
+    let agent = ctx.headers.get("User-Agent").cloned();
+    let response = if let Some(agent) = agent {
+        HttpResponse::new(HttpStatus::Ok)
+            .with_content(PlainTextContent::new(agent))
+    } else {
+        HttpResponse::new(HttpStatus::BadRequest)
+    };
+
+    ctx.send(response).await?;
+
     Ok(())
 }
