@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, BufReader};
 #[derive(Copy, Clone, Debug)]
 pub enum HttpStatus {
     Ok = 200,
+    Created = 201,
     BadRequest = 400,
     NotFound = 404,
     InternalServerError = 500,
@@ -18,6 +19,7 @@ impl Into<&'static str> for HttpStatus {
     fn into(self) -> &'static str {
         match self {
             HttpStatus::Ok => "OK",
+            HttpStatus::Created => "Created",
             HttpStatus::BadRequest => "BadRequest",
             HttpStatus::NotFound => "NotFound",
             HttpStatus::InternalServerError => "InternalServerError",
